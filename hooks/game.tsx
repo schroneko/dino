@@ -1,6 +1,6 @@
 import type { ClientModule, ClientSurface } from "claude-code";
 
-type Props = { best: number };
+type Props = { best: number; mode: "braille" | "svg" };
 
 type Rect = [number, number, number, number];
 
@@ -841,24 +841,29 @@ const COLORS = {
 
 type Segment = { text: string; isLight: boolean };
 
+type Label = { row: number; dotX: number; text: string; anchor: "start" | "middle" | "end" };
+
+type Raster = { main: Uint8Array; light: Uint8Array; labels: Label[] };
+
+export const SVG_WIDTH = 600;
+export const SVG_HEIGHT = DOT_ROWS * 2;
+
 const hash = (n: number) => (Math.imul(n ^ 0x9e3779b9, 0x85ebca6b) >>> 0) % 1009;
 
 const pad = (n: number) =>
   String(Math.min(n, 10 ** MAX_DISTANCE_UNITS - 1)).padStart(MAX_DISTANCE_UNITS, "0");
 
-export const frame = (game: Game, columns: number, best: number): Segment[][] => {
-  const main = new Uint8Array(columns * ROWS);
-  const light = new Uint8Array(columns * ROWS);
-  const overlay = new Map<number, string>();
-  const dotWidth = columns * 2;
+const rasterize = (game: Game, dotWidth: number, best: number): Raster => {
+  const main = new Uint8Array(dotWidth * DOT_ROWS);
+  const light = new Uint8Array(dotWidth * DOT_ROWS);
+  const labels: Label[] = [];
 
   const plot = (layer: Uint8Array, dx: number, dy: number) => {
     if (dx < 0 || dy < 0 || dx >= dotWidth || dy >= DOT_ROWS) {
       return;
     }
 
-    const cell = Math.floor(dy / 4) * columns + Math.floor(dx / 2);
-    layer[cell] = (layer[cell] ?? 0) | (BRAILLE[dy % 4]?.[dx % 2] ?? 0);
+    layer[dy * dotWidth + dx] = 1;
   };
 
   const draw = (layer: Uint8Array, image: Sprite, leftPx: number, topDot: number) => {
@@ -871,14 +876,6 @@ export const frame = (game: Game, columns: number, best: number): Segment[][] =>
         }
       }),
     );
-  };
-
-  const text = (row: number, col: number, value: string) => {
-    [...value].forEach((ch, i) => {
-      if (col + i >= 0 && col + i < columns) {
-        overlay.set(row * columns + col + i, ch);
-      }
-    });
   };
 
   if (game.night) {
@@ -944,17 +941,56 @@ export const frame = (game: Game, columns: number, best: number): Segment[][] =>
   const shown = achievement ? achievement.score : now;
   const current = isHidden ? " ".repeat(MAX_DISTANCE_UNITS) : pad(shown);
   const scoreText = best > 0 ? `HI ${pad(best)}  ${current}` : current;
-  text(0, columns - scoreText.length - 1, scoreText);
+  labels.push({ row: 0, dotX: dotWidth - 2, text: scoreText, anchor: "end" });
 
   if (game.phase === "crashed") {
-    const message = "G A M E   O V E R";
-    text(5, Math.floor((columns - message.length) / 2), message);
+    labels.push({ row: 5, dotX: dotWidth / 2, text: "G A M E   O V E R", anchor: "middle" });
     draw(main, RESTART, game.width / 2 - 18, Math.round((HEIGHT / 2 - 16) / 2) + 6);
   }
 
   if (game.phase === "waiting") {
-    text(2, 2, "Press space to play");
+    labels.push({ row: 2, dotX: 4, text: "Press space to play", anchor: "start" });
   }
+
+  return { main, light, labels };
+};
+
+export const frame = (game: Game, columns: number, best: number): Segment[][] => {
+  const dotWidth = columns * 2;
+  const { main, light, labels } = rasterize(game, dotWidth, best);
+  const overlay = new Map<number, string>();
+
+  labels.forEach((label) => {
+    const center = label.dotX / 2;
+    const start =
+      label.anchor === "end"
+        ? Math.floor(center) - label.text.length
+        : label.anchor === "middle"
+          ? Math.floor(center - label.text.length / 2)
+          : Math.floor(center);
+
+    [...label.text].forEach((ch, i) => {
+      const col = start + i;
+
+      if (col >= 0 && col < columns) {
+        overlay.set(label.row * columns + col, ch);
+      }
+    });
+  });
+
+  const bitsOf = (layer: Uint8Array, r: number, c: number) => {
+    let bits = 0;
+
+    for (let dy = 0; dy < 4; dy += 1) {
+      for (let dx = 0; dx < 2; dx += 1) {
+        if (layer[(r * 4 + dy) * dotWidth + c * 2 + dx]) {
+          bits |= BRAILLE[dy]?.[dx] ?? 0;
+        }
+      }
+    }
+
+    return bits;
+  };
 
   const rows: Segment[][] = [];
 
@@ -963,8 +999,8 @@ export const frame = (game: Game, columns: number, best: number): Segment[][] =>
 
     for (let c = 0; c < columns; c += 1) {
       const cell = r * columns + c;
-      const mainBits = main[cell] ?? 0;
-      const lightBits = light[cell] ?? 0;
+      const mainBits = bitsOf(main, r, c);
+      const lightBits = bitsOf(light, r, c);
       const overlayChar = overlay.get(cell);
       const ch = overlayChar ?? String.fromCharCode(0x2800 + (mainBits | lightBits));
       const isLight = overlayChar === undefined && mainBits === 0 && lightBits !== 0;
@@ -983,6 +1019,53 @@ export const frame = (game: Game, columns: number, best: number): Segment[][] =>
   return rows;
 };
 
+const runs = (layer: Uint8Array, dotWidth: number) => {
+  let d = "";
+
+  for (let y = 0; y < DOT_ROWS; y += 1) {
+    let x = 0;
+
+    while (x < dotWidth) {
+      if (!layer[y * dotWidth + x]) {
+        x += 1;
+        continue;
+      }
+
+      const start = x;
+
+      while (x < dotWidth && layer[y * dotWidth + x]) {
+        x += 1;
+      }
+
+      const w = (x - start) * 2;
+      d += `M${start * 2} ${y * 2}h${w}v2h-${w}z`;
+    }
+  }
+
+  return d;
+};
+
+export const svg = (game: Game, best: number) => {
+  const dotWidth = SVG_WIDTH / 2;
+  const { main, light, labels } = rasterize(game, dotWidth, best);
+  const colors = game.night ? COLORS.night : COLORS.day;
+  const texts = labels
+    .map(
+      (label) =>
+        `<text x="${label.dotX * 2}" y="${label.row * 8 + 11}" text-anchor="${label.anchor}" xml:space="preserve">${label.text}</text>`,
+    )
+    .join("");
+
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SVG_WIDTH} ${SVG_HEIGHT}" width="${SVG_WIDTH}" height="${SVG_HEIGHT}" shape-rendering="crispEdges">`,
+    `<rect width="${SVG_WIDTH}" height="${SVG_HEIGHT}" fill="${colors.bg}"/>`,
+    `<path fill="${colors.light}" d="${runs(light, dotWidth)}"/>`,
+    `<path fill="${colors.main}" d="${runs(main, dotWidth)}"/>`,
+    `<g fill="${colors.main}" font-family="ui-monospace, Menlo, monospace" font-size="12" letter-spacing="1">${texts}</g>`,
+    `</svg>`,
+  ].join("");
+};
+
 const TICK_MS = 33;
 const STEPS_PER_TICK = 2;
 const MIN_COLUMNS = 40;
@@ -994,21 +1077,29 @@ const columnsOf = (surface: ClientSurface<State>) =>
 const DinoGame: ClientModule<Props, State> = (props, surface: ClientSurface<State>) => {
   const { Box, Text } = surface.elements;
   const columns = columnsOf(surface);
+  const isSvg = props.mode === "svg";
 
   if (surface.state === undefined) {
-    let current: State = { game: newGame(columns * 4), frame: 0 };
+    const widthOf = () => (isSvg ? SVG_WIDTH : columnsOf(surface) * 4);
+    let current: State = { game: newGame(widthOf()), frame: 0 };
     let posted = false;
 
     const commit = () => {
       const game = current.game;
+      const isNewCrash = game.phase === "crashed" && !posted;
 
-      if (game.phase === "crashed" && !posted) {
+      if (isNewCrash) {
         posted = true;
-        surface.post({ score: score(game) });
       }
 
       if (game.phase !== "crashed") {
         posted = false;
+      }
+
+      if (isSvg) {
+        surface.post(isNewCrash ? { frame: game, score: score(game) } : { frame: game });
+      } else if (isNewCrash) {
+        surface.post({ score: score(game) });
       }
 
       current = { game, frame: current.frame + 1 };
@@ -1017,7 +1108,7 @@ const DinoGame: ClientModule<Props, State> = (props, surface: ClientSurface<Stat
 
     surface.every(TICK_MS, () => {
       const game = current.game;
-      const width = columnsOf(surface) * 4;
+      const width = widthOf();
       let changed = game.width !== width;
       game.width = width;
 
@@ -1049,12 +1140,26 @@ const DinoGame: ClientModule<Props, State> = (props, surface: ClientSurface<Stat
       }
     });
 
+    if (isSvg) {
+      surface.post({ frame: current.game });
+    }
+
     surface.setState(current);
   }
 
   const game = surface.state?.game ?? newGame(columns * 4);
   const best = Math.max(props.best ?? 0, game.phase === "crashed" ? score(game) : 0);
   const colors = game.night ? COLORS.night : COLORS.day;
+
+  if (isSvg) {
+    return (
+      <Text dimColor wrap="truncate">
+        {game.phase === "running"
+          ? "Space / Up: jump   Down: duck   /dino: close"
+          : "Click this line, then press Space to play   /dino: close"}
+      </Text>
+    );
+  }
 
   return (
     <Box flexDirection="column" width={columns}>

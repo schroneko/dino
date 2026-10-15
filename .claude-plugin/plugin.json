@@ -1,5 +1,6 @@
 {
   "name": "dino",
-  "version": "0.1.0",
-  "description": "Chrome's offline dinosaur game in a pane, opened with /dino"
+  "version": "0.2.0",
+  "description": "Chrome's offline dinosaur game above the prompt, toggled with /dino",
+  "types": "./types/index.d.ts"
 }

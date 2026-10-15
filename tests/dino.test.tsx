@@ -1,17 +1,16 @@
-import type { RenderPropsOf } from "claude-code";
+import type { CommandRunInput, RenderPropsOf } from "claude-code";
 import { expect, mock, test } from "claude-code/testing";
 
 import { collides, newGame, pressDuck, pressJump, score, update } from "../hooks/game";
 
-const PANE = {
-  title: "Dino",
-  isFocused: true,
+const BAND = {
+  hasSurvey: false,
+  isWorking: false,
+  maxRows: 24,
   bodyColumns: 100,
-  placement: "inline",
-  scroll: { top: 0, bodyRows: 20 },
-} as unknown as RenderPropsOf["Pane"];
+} as unknown as RenderPropsOf["AbovePrompt"];
 
-const SURFACES = ["terminal", "desktop"] as const;
+const RUN = { command: "dino", args: "" } as unknown as CommandRunInput;
 
 const FRAME = 1000 / 60;
 
@@ -85,32 +84,87 @@ test("score counts distance as Chromium does", async () => {
   expect(score(game)).toBeGreaterThan(0);
 });
 
-test("the pane starts, runs and records a best score", async ($, on) => {
+test("/dino toggles the band above the prompt", async ($, on) => {
   mock.store(on);
+  on("ui.render", { component: "AbovePrompt" }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
 
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({
-      plugin: "dino",
-      surface,
-      component: "Pane",
-      requestId: "dino",
-      props: PANE,
-    });
-    await ui.resize({ columns: 100, rows: 19 });
+    return <Text key="engine">prompt</Text>;
+  });
 
-    expect(await ui.find({ type: "Text", text: /Press space to play/, in: "game" })).toBeDefined();
+  const closed = await $.ui.mount({
+    plugin: "dino",
+    surface: "terminal",
+    component: "AbovePrompt",
+    props: BAND,
+  });
+  expect(await closed.find({ key: "game" })).toBeUndefined();
+  await closed.unmount();
 
-    await ui.key({ key: " " });
-    await ui.advance(500);
-    expect(
-      await ui.find({ type: "Text", text: /Press space to play/, in: "game" }),
-    ).toBeUndefined();
-    expect(await ui.find({ type: "Text", text: /\d{5}/, in: "game" })).toBeDefined();
+  await $.command.run(RUN);
+  const opened = await $.ui.mount({
+    plugin: "dino",
+    surface: "terminal",
+    component: "AbovePrompt",
+    props: BAND,
+  });
+  expect(await opened.find({ key: "game" })).toBeDefined();
+  await opened.unmount();
 
-    await ui.post({ score: 42 });
-    await ui.advance(50);
-    expect(await ui.find({ type: "Text", text: /HI 00042/, in: "game" })).toBeDefined();
+  await $.command.run(RUN);
+  const again = await $.ui.mount({
+    plugin: "dino",
+    surface: "terminal",
+    component: "AbovePrompt",
+    props: BAND,
+  });
+  expect(await again.find({ key: "game" })).toBeUndefined();
+  await again.unmount();
+});
 
-    await ui.unmount();
-  }
+test("the terminal band runs the braille game and records a best score", async ($, on) => {
+  mock.store(on);
+  await $.command.run(RUN);
+
+  const ui = await $.ui.mount({
+    plugin: "dino",
+    surface: "terminal",
+    component: "AbovePrompt",
+    props: BAND,
+  });
+  await ui.resize({ columns: 100, rows: 19 });
+  expect(await ui.find({ type: "Text", text: /Press space to play/, in: "game" })).toBeDefined();
+
+  await ui.key({ key: " " });
+  await ui.advance(500);
+  expect(await ui.find({ type: "Text", text: /Press space to play/, in: "game" })).toBeUndefined();
+
+  await ui.post({ score: 42 });
+  await ui.advance(50);
+  expect(await ui.find({ type: "Text", text: /HI 00042/, in: "game" })).toBeDefined();
+  await ui.unmount();
+});
+
+test("the desktop band draws the game as an SVG", async ($, on) => {
+  mock.store(on);
+  await $.command.run(RUN);
+
+  const ui = await $.ui.mount({
+    plugin: "dino",
+    surface: "desktop",
+    component: "AbovePrompt",
+    props: BAND,
+  });
+  await ui.resize({ columns: 80, rows: 1 });
+  await ui.advance(50);
+
+  const drawing = await ui.find({ type: "Svg" });
+  expect(drawing).toBeDefined();
+  expect(String(drawing?.props.source)).toContain("Press space to play");
+
+  await ui.key({ key: " " });
+  await ui.advance(500);
+  const running = await ui.find({ type: "Svg" });
+  expect(String(running?.props.source)).not.toContain("Press space to play");
+  await ui.unmount();
 });

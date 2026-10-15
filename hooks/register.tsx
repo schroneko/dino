@@ -1,7 +1,13 @@
+import { atom, read, update } from "claude-code";
 import type { Register } from "claude-code";
 
-const PANE = "dino";
+import { SVG_HEIGHT, SVG_WIDTH, svg } from "./game";
+import type { Game } from "./game";
+
 const BEST = "best";
+
+const isOpen = atom({ plugin: "dino", key: "isOpen" } as const, false);
+const snapshot = atom({ plugin: "dino", key: "snapshot" } as const, null);
 
 const toBest = (stored: unknown) => {
   const value = Number(stored);
@@ -13,47 +19,102 @@ export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
     await $.command.register({
       name: "dino",
-      description: "Play the offline dinosaur game in a pane",
+      description: "Show or hide the offline dinosaur game above the prompt",
     });
 
     return next(e);
   });
 
   on("command.run", { command: "dino" }, async ($) => {
-    await $.ui.open({ id: PANE, title: "Dino", focus: true, rows: 20 });
+    const open = !(await read($, isOpen));
+    await update($, isOpen, () => open);
 
-    return { text: "Dino opened. Click the game, then Space or Up to jump, Down to duck." };
-  });
+    if (!open) {
+      await update($, snapshot, () => null);
 
-  on("ui.render", { component: "Pane", requestId: PANE }, async ($, e) => {
-    const best = toBest(await $.store.get(BEST));
-
-    if (e.surface !== "terminal" && e.surface !== "desktop") {
-      const { Text } = $.ui.resolve(e);
-
-      return <Text dimColor>Dino runs in the terminal or the desktop app. Best: {best}</Text>;
+      return { text: "Dino closed." };
     }
 
-    const { Box, Client } = $.ui.resolve(e);
-
-    return (
-      <Box flexDirection="column">
-        <Client key="game" module="./game.tsx" props={{ best }} height={19} width="100%" />
-      </Box>
-    );
+    return {
+      text: "Dino is above the prompt. Click it, then Space or Up to jump, Down to duck. Run /dino again to close.",
+    };
   });
 
-  on("ui.message", { requestId: PANE }, async ($, e) => {
-    const data = e.data as { score?: unknown };
-    const score = Number(data?.score);
+  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+    if (e.props.hasSurvey || !(await read($, isOpen))) {
+      return next(e);
+    }
+
     const best = toBest(await $.store.get(BEST));
 
+    if (e.surface === "terminal") {
+      const { Box, Client } = $.ui.resolve(e);
+
+      return (
+        <Box flexDirection="column">
+          <Client
+            key="game"
+            module="./game.tsx"
+            props={{ best, mode: "braille" }}
+            height={19}
+            width="100%"
+          />
+        </Box>
+      );
+    }
+
+    if (e.surface === "desktop") {
+      const { Box, Client, Svg } = $.ui.resolve(e);
+      const game = await read($, snapshot);
+
+      return (
+        <Box flexDirection="column">
+          {game && (
+            <Svg
+              source={svg(game as Game, best)}
+              alt="Chrome offline dinosaur game"
+              width={SVG_WIDTH}
+              height={SVG_HEIGHT}
+            />
+          )}
+          <Client
+            key="game"
+            module="./game.tsx"
+            props={{ best, mode: "svg" }}
+            height={1}
+            width="100%"
+          />
+        </Box>
+      );
+    }
+
+    const { Text } = $.ui.resolve(e);
+
+    return <Text dimColor>Dino runs in the terminal or the desktop app. Best: {best}</Text>;
+  });
+
+  on("ui.message", async ($, e) => {
+    const data = (e.data ?? {}) as { frame?: Game; score?: unknown };
+
+    if (data.frame) {
+      const frame = data.frame;
+      await update($, snapshot, () => frame);
+    }
+
+    if (data.score === undefined) {
+      return {};
+    }
+
+    const score = Number(data.score);
+    const best = toBest(await $.store.get(BEST));
+    const mode = e.surface === "desktop" ? "svg" : "braille";
+
     if (!Number.isFinite(score) || score <= best) {
-      return { props: { best } };
+      return { props: { best, mode } };
     }
 
     await $.store.set(BEST, score);
 
-    return { props: { best: score } };
+    return { props: { best: score, mode } };
   });
 };
